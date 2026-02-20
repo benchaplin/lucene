@@ -1631,7 +1631,8 @@ public abstract class BaseDirectoryTestCase extends LuceneTestCase {
     try (Directory dir = getDirectory(createTempDir())) {
       Directory inner = FilterDirectory.unwrap(dir);
       if (inner instanceof FileSwitchDirectory fsd) {
-        // We check the secondary directory based on the assumption that the file in this test will always route there.
+        // We check the secondary directory based on the assumption that the file in this test will
+        // always route there.
         inner = FilterDirectory.unwrap(fsd.getSecondaryDir());
       }
       MMapDirectory mMapDir = inner instanceof MMapDirectory mmap ? mmap : null;
