@@ -2454,4 +2454,76 @@ public class TestLRUQueryCache extends LuceneTestCase {
     reader.close();
     dir.close();
   }
+
+  public void testConcurrentMaxSizeBytesOverflow() throws Throwable {
+    Directory dir = newDirectory();
+    // NoMergePolicy ensures each commit produces a separate segment,
+    // increasing cache pressure per query
+    RandomIndexWriter w =
+        new RandomIndexWriter(
+            random(), dir, newIndexWriterConfig().setMergePolicy(NoMergePolicy.INSTANCE));
+
+    int numThreads = atLeast(4);
+    // Add one doc per thread with a unique term, committing after each to get distinct segments
+    for (int i = 0; i < numThreads; i++) {
+      Document doc = new Document();
+      doc.add(new StringField("f", Integer.toString(i), Store.NO));
+      w.addDocument(doc);
+      w.commit();
+    }
+    IndexReader reader = w.getReader();
+    w.close();
+
+    // maxRamBytesUsed is small enough that all numThreads entries together exceed it,
+    // but large enough to accept at least one entry (avoids the "too large to ever cache" path).
+    // getRamBytesUsed(TermQuery) ~100 bytes + numThreads leaf entries at ~112 bytes each
+    // means 4 threads * 4 segments totals ~2368 bytes, well above this limit.
+    final long maxRamBytesUsed = 1000L;
+    final LRUQueryCache queryCache =
+        new LRUQueryCache(Integer.MAX_VALUE, maxRamBytesUsed, _ -> true, Float.POSITIVE_INFINITY);
+
+    IndexSearcher searcher = newSearcher(reader);
+    searcher.setQueryCache(queryCache);
+    searcher.setQueryCachingPolicy(ALWAYS_CACHE);
+
+    CountDownLatch latch = new CountDownLatch(numThreads);
+    AtomicReference<Throwable> error = new AtomicReference<>();
+    Thread[] threads = new Thread[numThreads];
+
+    for (int t = 0; t < numThreads; t++) {
+      final Query query = new TermQuery(new Term("f", Integer.toString(t)));
+      threads[t] =
+          new Thread(
+              () -> {
+                latch.countDown();
+                try {
+                  latch.await();
+                  searcher.count(query);
+                } catch (Throwable e) {
+                  error.compareAndSet(null, e);
+                }
+              });
+    }
+
+    for (Thread thread : threads) {
+      thread.start();
+    }
+    for (Thread thread : threads) {
+      thread.join();
+    }
+
+    if (error.get() != null) {
+      throw error.get();
+    }
+    assertTrue(
+        "ramBytesUsed "
+            + queryCache.ramBytesUsed()
+            + " exceeded maxRamBytesUsed "
+            + maxRamBytesUsed,
+        queryCache.ramBytesUsed() <= maxRamBytesUsed);
+    queryCache.assertConsistent();
+
+    reader.close();
+    dir.close();
+  }
 }
